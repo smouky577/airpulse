@@ -1,0 +1,30 @@
+# Desktop CMake / test build
+/build/
+
+# Android / Gradle
+airpulse-android/.gradle/
+airpulse-android/**/build/
+airpulse-android/**/.cxx/
+airpulse-android/local.properties
+airpulse-android/app/release/
+*.apk.d
+*.iml
+.idea/
+
+# Recordings and debug captures (hundreds of MB)
+Debug/
+debug-*.log
+*.apraw
+*.apraw.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+gridscreen-windows/_test_grid.png
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
