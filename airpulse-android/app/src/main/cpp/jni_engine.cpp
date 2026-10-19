@@ -251,7 +251,7 @@ void maybe_zoom_to_pattern(Engine& engine, airpulse::ImageU8& bgr, airpulse::Ima
         }
         if (engine.pattern_have) {
             const float frac = static_cast<float>(engine.pat_w) * engine.pat_h / (static_cast<float>(w) * h);
-            if (frac < 0.82f) {
+            if (frac < 0.92f) {
                 engine.scratch_gray = gray.data;
                 engine.scratch_bgr = bgr.data;
                 crop_scale_gray(engine.scratch_gray.data(), w, h, engine.pat_x, engine.pat_y, engine.pat_w,
@@ -384,10 +384,7 @@ bool run_frame(Engine& engine, airpulse::ImageU8& bgr, airpulse::ImageU8& gray, 
         }
         decorate_air_view(engine, bgr);
         write_argb(bgr, pixels);
-    } else if (engine.capture_ref && engine.bos.reference_ready() && stats.motion > 18.f) {
-        engine.bos.clear_reference();
-        engine.arm_settle();
-        stats.snr = 2.f;
+    } else if (engine.capture_ref && engine.bos.reference_ready() && stats.motion > 25.f) {
         decorate_air_view(engine, bgr);
         write_argb(bgr, pixels);
     } else if (engine.capture_ref && engine.bos.reference_ready()) {
