@@ -601,7 +601,7 @@ class FramePump(
             ui.hintBlur = controls.air && snap[2] < 6f
             ui.hintPattern = controls.air && snap[2] >= 6f
             ui.hintHot = controls.air && snap[4] >= 0.5f && snap[1] * controls.gain.toFloat() > 1.2f
-            ui.hintPhone = controls.air && snap[4] >= 0.5f && snap[7] > 0.25f
+            ui.hintPhone = controls.air && (snap[3] > 12f || (snap[4] < 0.5f && snap[8] > 0.05f) || (snap[4] >= 0.5f && snap[7] > 0.25f))
             ui.hintFps = fpsUnstable
             ui.recordSec = recordSecNow
             if (trace != null) ui.trace = trace
@@ -725,7 +725,11 @@ private fun AirPulseScreen(
             Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
                 if (air) {
                     Text(
-                        if (ui.refReady) stringResource(R.string.p995, ui.p995) else stringResource(R.string.ref_progress, ui.refCount, 30),
+                        when {
+                            ui.refReady -> stringResource(R.string.p995, ui.p995)
+                            ui.snr > 0.05f -> stringResource(R.string.wait_ref, ui.snr)
+                            else -> stringResource(R.string.ref_progress, ui.refCount, 30)
+                        },
                         color = Color.White,
                         fontSize = 22.sp,
                     )
@@ -775,7 +779,7 @@ private fun AirPulseScreen(
                     if (ui.hintMotion) add(stringResource(R.string.hint_motion))
                     if (ui.hintLight) add(stringResource(R.string.hint_light))
                     if (ui.hintBlur) add(stringResource(R.string.hint_blur))
-                    if (ui.hintPattern) add(stringResource(R.string.hint_pattern))
+                    if (ui.hintPattern) add(stringResource(R.string.hint_distance))
                     if (ui.hintHot) add(stringResource(R.string.hint_hot))
                     if (ui.hintPhone) add(stringResource(R.string.hint_phone))
                     if (ui.hintFps) add(stringResource(R.string.hint_fps))

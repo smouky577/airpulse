@@ -4,6 +4,7 @@
 #include <android/log.h>
 #include <jni.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -30,6 +31,23 @@ struct Engine {
     bool have_prev = false;
     airpulse::PulseParams pulse_params;
     airpulse::BosParams bos_params;
+    std::chrono::steady_clock::time_point settle_until{};
+    bool pattern_have = false;
+    bool pattern_lock = false;
+    bool pattern_zoomed = false;
+    int pat_x = 0;
+    int pat_y = 0;
+    int pat_w = 0;
+    int pat_h = 0;
+    std::vector<uint8_t> scratch_bgr;
+    std::vector<uint8_t> scratch_gray;
+
+    void arm_settle() {
+        settle_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        pattern_lock = false;
+        pattern_have = false;
+        pattern_zoomed = false;
+    }
 };
 
 Engine* engine_of(jlong handle) {
@@ -116,6 +134,165 @@ float contrast_of(const std::vector<uint8_t>& gray, int w, int h) {
     return count ? static_cast<float>(sum / count) : 0.f;
 }
 
+bool find_pattern_rect(const uint8_t* gray, int w, int h, int& x, int& y, int& rw, int& rh) {
+    const int ts = 16;
+    const int nx = w / ts;
+    const int ny = h / ts;
+    if (nx < 3 || ny < 3) return false;
+    std::vector<float> score(static_cast<size_t>(nx * ny), 0.f);
+    float best = 0.f;
+    for (int ty = 0; ty < ny; ++ty) {
+        for (int tx = 0; tx < nx; ++tx) {
+            double sum = 0.0;
+            int n = 0;
+            const int y0 = ty * ts;
+            const int x0 = tx * ts;
+            for (int yy = y0; yy < y0 + ts; ++yy) {
+                const uint8_t* row = gray + static_cast<size_t>(yy) * w;
+                for (int xx = x0; xx < x0 + ts - 1; ++xx) {
+                    sum += std::abs(static_cast<int>(row[xx]) - static_cast<int>(row[xx + 1]));
+                    ++n;
+                }
+            }
+            const float s = n ? static_cast<float>(sum / n) : 0.f;
+            score[static_cast<size_t>(ty * nx + tx)] = s;
+            if (s > best) best = s;
+        }
+    }
+    if (best < 10.f) return false;
+    const float thr = std::max(8.f, best * 0.4f);
+    int minx = nx, miny = ny, maxx = -1, maxy = -1;
+    int marked = 0;
+    for (int ty = 0; ty < ny; ++ty) {
+        for (int tx = 0; tx < nx; ++tx) {
+            if (score[static_cast<size_t>(ty * nx + tx)] < thr) continue;
+            ++marked;
+            if (tx < minx) minx = tx;
+            if (ty < miny) miny = ty;
+            if (tx > maxx) maxx = tx;
+            if (ty > maxy) maxy = ty;
+        }
+    }
+    if (marked < 6 || maxx < minx) return false;
+    minx = std::max(0, minx - 1);
+    miny = std::max(0, miny - 1);
+    maxx = std::min(nx - 1, maxx + 1);
+    maxy = std::min(ny - 1, maxy + 1);
+    x = minx * ts;
+    y = miny * ts;
+    rw = (maxx + 1) * ts - x;
+    rh = (maxy + 1) * ts - y;
+    if (x + rw > w) rw = w - x;
+    if (y + rh > h) rh = h - y;
+    return rw >= static_cast<int>(w * 0.2f) && rh >= static_cast<int>(h * 0.2f);
+}
+
+void crop_scale_gray(const uint8_t* src, int sw, int sh, int cx, int cy, int cw, int ch, uint8_t* dst, int dw,
+                     int dh) {
+    for (int y = 0; y < dh; ++y) {
+        const float fy = (y + 0.5f) * ch / dh - 0.5f + cy;
+        const int y0 = clamp_int(static_cast<int>(std::floor(fy)), 0, sh - 1);
+        const int y1 = clamp_int(y0 + 1, 0, sh - 1);
+        const float wy = std::min(1.f, std::max(0.f, fy - y0));
+        for (int x = 0; x < dw; ++x) {
+            const float fx = (x + 0.5f) * cw / dw - 0.5f + cx;
+            const int x0 = clamp_int(static_cast<int>(std::floor(fx)), 0, sw - 1);
+            const int x1 = clamp_int(x0 + 1, 0, sw - 1);
+            const float wx = std::min(1.f, std::max(0.f, fx - x0));
+            const float v00 = src[y0 * sw + x0];
+            const float v10 = src[y0 * sw + x1];
+            const float v01 = src[y1 * sw + x0];
+            const float v11 = src[y1 * sw + x1];
+            const float v = (v00 * (1.f - wx) + v10 * wx) * (1.f - wy) + (v01 * (1.f - wx) + v11 * wx) * wy;
+            dst[y * dw + x] = static_cast<uint8_t>(clamp_int(static_cast<int>(v + 0.5f), 0, 255));
+        }
+    }
+}
+
+void crop_scale_bgr(const uint8_t* src, int sw, int sh, int cx, int cy, int cw, int ch, uint8_t* dst, int dw,
+                    int dh) {
+    for (int y = 0; y < dh; ++y) {
+        const float fy = (y + 0.5f) * ch / dh - 0.5f + cy;
+        const int y0 = clamp_int(static_cast<int>(std::floor(fy)), 0, sh - 1);
+        const int y1 = clamp_int(y0 + 1, 0, sh - 1);
+        const float wy = std::min(1.f, std::max(0.f, fy - y0));
+        for (int x = 0; x < dw; ++x) {
+            const float fx = (x + 0.5f) * cw / dw - 0.5f + cx;
+            const int x0 = clamp_int(static_cast<int>(std::floor(fx)), 0, sw - 1);
+            const int x1 = clamp_int(x0 + 1, 0, sw - 1);
+            const float wx = std::min(1.f, std::max(0.f, fx - x0));
+            for (int c = 0; c < 3; ++c) {
+                const float v00 = src[(y0 * sw + x0) * 3 + c];
+                const float v10 = src[(y0 * sw + x1) * 3 + c];
+                const float v01 = src[(y1 * sw + x0) * 3 + c];
+                const float v11 = src[(y1 * sw + x1) * 3 + c];
+                const float v = (v00 * (1.f - wx) + v10 * wx) * (1.f - wy) + (v01 * (1.f - wx) + v11 * wx) * wy;
+                dst[(y * dw + x) * 3 + c] = static_cast<uint8_t>(clamp_int(static_cast<int>(v + 0.5f), 0, 255));
+            }
+        }
+    }
+}
+
+void maybe_zoom_to_pattern(Engine& engine, airpulse::ImageU8& bgr, airpulse::ImageU8& gray) {
+    bool zoom = false;
+    if (engine.capture_ref) {
+        const int w = engine.width;
+        const int h = engine.height;
+        if (!engine.pattern_lock) {
+            int x = 0, y = 0, rw = 0, rh = 0;
+            if (find_pattern_rect(gray.data.data(), w, h, x, y, rw, rh)) {
+                engine.pat_x = x;
+                engine.pat_y = y;
+                engine.pat_w = rw;
+                engine.pat_h = rh;
+                engine.pattern_have = true;
+                engine.pattern_lock = true;
+            }
+        }
+        if (engine.pattern_have) {
+            const float frac = static_cast<float>(engine.pat_w) * engine.pat_h / (static_cast<float>(w) * h);
+            if (frac < 0.82f) {
+                engine.scratch_gray = gray.data;
+                engine.scratch_bgr = bgr.data;
+                crop_scale_gray(engine.scratch_gray.data(), w, h, engine.pat_x, engine.pat_y, engine.pat_w,
+                                engine.pat_h, gray.data.data(), w, h);
+                crop_scale_bgr(engine.scratch_bgr.data(), w, h, engine.pat_x, engine.pat_y, engine.pat_w,
+                               engine.pat_h, bgr.data.data(), w, h);
+                zoom = true;
+            }
+        }
+    }
+    if (zoom != engine.pattern_zoomed) engine.have_prev = false;
+    engine.pattern_zoomed = zoom;
+}
+
+void stroke_frame(airpulse::ImageU8& bgr, int r, int g, int b) {
+    const int w = bgr.width;
+    const int h = bgr.height;
+    for (int t = 0; t < 2; ++t) {
+        for (int x = 0; x < w; ++x) {
+            for (int yy : {t, h - 1 - t}) {
+                uint8_t* p = bgr.data.data() + (static_cast<size_t>(yy) * w + x) * 3;
+                p[0] = static_cast<uint8_t>(b);
+                p[1] = static_cast<uint8_t>(g);
+                p[2] = static_cast<uint8_t>(r);
+            }
+        }
+        for (int y = 0; y < h; ++y) {
+            for (int xx : {t, w - 1 - t}) {
+                uint8_t* p = bgr.data.data() + (static_cast<size_t>(y) * w + xx) * 3;
+                p[0] = static_cast<uint8_t>(b);
+                p[1] = static_cast<uint8_t>(g);
+                p[2] = static_cast<uint8_t>(r);
+            }
+        }
+    }
+}
+
+void decorate_air_view(Engine& engine, airpulse::ImageU8& shown) {
+    if (engine.pattern_zoomed) stroke_frame(shown, 61, 220, 132);
+}
+
 float motion_of(const std::vector<uint8_t>& gray, std::vector<uint8_t>& prev, bool& have_prev) {
     float motion = 0.f;
     if (have_prev && prev.size() == gray.size()) {
@@ -190,13 +367,28 @@ void store_stats(JNIEnv* env, jfloatArray stats, const FrameStats& s) {
 bool run_frame(Engine& engine, airpulse::ImageU8& bgr, airpulse::ImageU8& gray, int roi_x, int roi_y, int roi_w,
                int roi_h, jint* pixels, FrameStats& stats, std::vector<uint8_t>* record_bgr) {
     const auto t0 = std::chrono::steady_clock::now();
+    maybe_zoom_to_pattern(engine, bgr, gray);
     stats.contrast = contrast_of(gray.data, engine.width, engine.height);
     stats.motion = motion_of(gray.data, engine.prev_gray, engine.have_prev);
     if (record_bgr != nullptr) *record_bgr = bgr.data;
 
     const airpulse::Rect roi = clamp_roi(roi_x, roi_y, roi_w, roi_h, engine.width, engine.height);
     if (engine.capture_ref && !engine.bos.reference_ready()) {
-        engine.bos.add_reference(gray);
+        const auto now = std::chrono::steady_clock::now();
+        if (now < engine.settle_until) {
+            stats.snr = std::chrono::duration<float>(engine.settle_until - now).count();
+        } else if (stats.motion > 12.f) {
+            stats.snr = 0.f;
+        } else {
+            engine.bos.add_reference(gray);
+        }
+        decorate_air_view(engine, bgr);
+        write_argb(bgr, pixels);
+    } else if (engine.capture_ref && engine.bos.reference_ready() && stats.motion > 18.f) {
+        engine.bos.clear_reference();
+        engine.arm_settle();
+        stats.snr = 2.f;
+        decorate_air_view(engine, bgr);
         write_argb(bgr, pixels);
     } else if (engine.capture_ref && engine.bos.reference_ready()) {
         airpulse::ImageU8 heat;
@@ -222,6 +414,7 @@ bool run_frame(Engine& engine, airpulse::ImageU8& bgr, airpulse::ImageU8& gray, 
                 heat.data[i * 3 + 2] = static_cast<uint8_t>(heat.data[i * 3 + 2] * heat_w + bgr.data[i * 3 + 2] * cam_w);
             }
         }
+        decorate_air_view(engine, heat);
         write_argb(heat, pixels);
     } else {
         airpulse::ImageU8 shown = engine.pulse.magnify(bgr);
@@ -287,6 +480,7 @@ JNIEXPORT void JNICALL Java_com_airpulse_app_NativeEngine_nativeConfigure(
     try {
         engine->pulse.reset(width, height, fps, engine->pulse_params);
         engine->bos.reset(fps, engine->bos_params);
+        if (engine->capture_ref) engine->arm_settle();
     } catch (const std::exception& ex) {
         LOGI("configure failed: %s", ex.what());
     }
@@ -298,6 +492,7 @@ JNIEXPORT void JNICALL Java_com_airpulse_app_NativeEngine_nativeUpdate(
     Engine* engine = engine_of(handle);
     if (engine == nullptr) return;
     std::lock_guard<std::mutex> lock(engine->mu);
+    const bool starting_air = air_mode == JNI_TRUE && !engine->capture_ref;
     engine->capture_ref = air_mode == JNI_TRUE;
     engine->pulse_params.alpha = alpha;
     engine->pulse_params.low_hz = low_hz;
@@ -311,6 +506,10 @@ JNIEXPORT void JNICALL Java_com_airpulse_app_NativeEngine_nativeUpdate(
         if (engine->width > 0) {
             engine->pulse.set_params(engine->pulse_params);
             engine->bos.set_params(engine->bos_params);
+            if (starting_air) {
+                engine->bos.clear_reference();
+                engine->arm_settle();
+            }
         }
     } catch (const std::exception& ex) {
         LOGI("update failed: %s", ex.what());
@@ -322,6 +521,7 @@ JNIEXPORT void JNICALL Java_com_airpulse_app_NativeEngine_nativeClearReference(J
     if (engine == nullptr) return;
     std::lock_guard<std::mutex> lock(engine->mu);
     engine->bos.clear_reference();
+    engine->arm_settle();
 }
 
 JNIEXPORT jboolean JNICALL Java_com_airpulse_app_NativeEngine_nativeProcessYuv(

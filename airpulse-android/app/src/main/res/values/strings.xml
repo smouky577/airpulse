@@ -32,11 +32,13 @@
     <string name="hint_motion">Твърде много движение</string>
     <string name="hint_light">Светлината се мени</string>
     <string name="hint_blur">Шаблонът е размазан</string>
-    <string name="hint_pattern">Шаблонът се вижда</string>
+    <string name="hint_pattern">Решетката се вижда</string>
+    <string name="hint_distance">Не е нужно да пълни кадъра — отдръпни се, газът трябва да е между телефона и монитора</string>
     <string name="hint_hot">Ръката е твърде близо — газът се вижда върху решетката, не върху пламъка</string>
     <string name="hint_phone">Телефонът мърда</string>
     <string name="hint_manual">Тази камера не дава ръчен затвор</string>
-    <string name="hint_ref">Дръж въздуха чист пред екрана</string>
+    <string name="hint_ref">Не пипай екрана — стойката трепери и разваля еталона</string>
+    <string name="wait_ref">Не пипай %1$.0f с — чакам стойката да спре</string>
     <string name="hint_fps">Кадрите не държат избраната скорост</string>
     <string name="replay">Пускам записа…</string>
     <string name="replay_progress">Запис %1$d / %2$d с</string>
