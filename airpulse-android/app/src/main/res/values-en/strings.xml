@@ -16,11 +16,11 @@
     <string name="collecting">Collecting data…</string>
     <string name="weak_signal">Weak signal — show your face, closer and in good light</string>
     <string name="bpm">%1$.0f bpm</string>
-    <string name="gain">Amplification</string>
+    <string name="gain">Pulse amplification</string>
     <string name="low_hz">Low cutoff, Hz</string>
     <string name="high_hz">High cutoff, Hz</string>
     <string name="pyramid">Pyramid</string>
-    <string name="air_gain">Map gain</string>
+    <string name="air_gain">Air amplification</string>
     <string name="blur">Blur</string>
     <string name="exposure">Exposure</string>
     <string name="auto">Auto</string>
@@ -34,7 +34,7 @@
     <string name="hint_blur">Pattern is blurry</string>
     <string name="hint_pattern">Pattern is visible</string>
     <string name="hint_distance">The grid does not need to fill the frame — step back; air goes between the phone and the screen</string>
-    <string name="hint_hot">Map is clipping — lower the gain or keep the hand out of frame</string>
+    <string name="hint_hot">Hand is too close — watch the waves on the lines, not the flame</string>
     <string name="hint_phone">The phone is moving</string>
     <string name="hint_manual">This camera has no manual shutter</string>
     <string name="hint_ref">Do not touch the screen — stand shake ruins the reference</string>
@@ -45,7 +45,7 @@
     <string name="open_recording">Open recording</string>
     <string name="close">Close</string>
     <string name="permission">Camera permission is required</string>
-    <string name="p995">99.5%% : %1$.3f px</string>
+    <string name="p995">99.5%% : %1$.1f</string>
     <string name="ref_progress">Reference %1$d / %2$d</string>
     <string name="saved">Saved: %1$s</string>
     <string name="replay_done">Done. Result is in %1$s</string>

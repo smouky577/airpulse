@@ -16,11 +16,11 @@
     <string name="collecting">Събирам данни…</string>
     <string name="weak_signal">Слаб сигнал — покажи лицето, по-близо и на светло</string>
     <string name="bpm">%1$.0f bpm</string>
-    <string name="gain">Усилване</string>
+    <string name="gain">Усилване на пулса</string>
     <string name="low_hz">Долна граница, Hz</string>
     <string name="high_hz">Горна граница, Hz</string>
     <string name="pyramid">Пирамида</string>
-    <string name="air_gain">Печалба на картата</string>
+    <string name="air_gain">Усилване на въздуха</string>
     <string name="blur">Размазване</string>
     <string name="exposure">Експозиция</string>
     <string name="auto">Авто</string>
@@ -34,7 +34,7 @@
     <string name="hint_blur">Шаблонът е размазан</string>
     <string name="hint_pattern">Решетката се вижда</string>
     <string name="hint_distance">Не е нужно да пълни кадъра — отдръпни се, газът трябва да е между телефона и монитора</string>
-    <string name="hint_hot">Ръката е твърде близо — газът се вижда върху решетката, не върху пламъка</string>
+    <string name="hint_hot">Ръката е твърде близо — гледай вълните върху линиите, не пламъка</string>
     <string name="hint_phone">Телефонът мърда</string>
     <string name="hint_manual">Тази камера не дава ръчен затвор</string>
     <string name="hint_ref">Не пипай екрана — стойката трепери и разваля еталона</string>
@@ -45,7 +45,7 @@
     <string name="open_recording">Отвори запис</string>
     <string name="close">Затвори</string>
     <string name="permission">Нужна е камерата</string>
-    <string name="p995">99.5%% : %1$.3f px</string>
+    <string name="p995">99.5%% : %1$.1f</string>
     <string name="ref_progress">Еталон %1$d / %2$d</string>
     <string name="saved">Записано: %1$s</string>
     <string name="replay_done">Готово. Резултатът е в %1$s</string>

@@ -38,9 +38,9 @@ airpulse-android\build-apk.bat
 gridscreen-windows\GridScreen.bat
 ```
 
-Fullscreen (F11), start with cell size **8 px**. The grid does not need to fill the camera; standing farther back (50–80 cm) leaves room for the air. The app crops to the screen. Air must pass **between** the phone and the monitor.
+Fullscreen (F11), **horizontal lines**, cell **8 px**. If the camera shows rainbow swirls, press 8 or 9. The grid does not need to fill the camera; standing farther back (50–80 cm) leaves room for the air. The app crops to the screen. Air must pass **between** the phone and the monitor.
 
-Цял екран (F11), клетка **8 px**. Решетката не трябва да пълни кадъра — по-назад (50–80 см) има място за въздуха. Приложението изрязва монитора. Въздухът минава **между** телефона и екрана.
+Цял екран (F11), **хоризонтални линии**, клетка **8 px**. Ако камерата вижда дъга/спирала, натисни 8 или 9. Решетката не трябва да пълни кадъра — по-назад (50–80 см) има място за въздуха. Приложението изрязва монитора. Въздухът минава **между** телефона и екрана.
 
 ## Layout / Структура
 

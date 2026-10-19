@@ -338,7 +338,7 @@ data class Controls(
     val lowHz: Double = 0.8,
     val highHz: Double = 2.0,
     val pyramid: Int = 4,
-    val gain: Double = 3.0,
+    val gain: Double = 0.0,
     val blur: Double = 0.8,
     val winsize: Int = 15,
     val highpass: Double = 0.0,
@@ -600,7 +600,7 @@ class FramePump(
             ui.hintLight = !controls.air && lightNow
             ui.hintBlur = controls.air && snap[2] < 6f
             ui.hintPattern = controls.air && snap[2] >= 6f
-            ui.hintHot = controls.air && snap[4] >= 0.5f && snap[1] * controls.gain.toFloat() > 1.2f
+            ui.hintHot = controls.air && snap[4] >= 0.5f && snap[1] > 28f
             ui.hintPhone = controls.air && (snap[3] > 12f || (snap[4] < 0.5f && snap[8] > 0.05f) || (snap[4] >= 0.5f && snap[7] > 0.25f))
             ui.hintFps = fpsUnstable
             ui.recordSec = recordSecNow
@@ -650,7 +650,7 @@ private fun AirPulseScreen(
     var lowHz by remember { mutableFloatStateOf(0.8f) }
     var highHz by remember { mutableFloatStateOf(2.0f) }
     var pyramid by remember { mutableFloatStateOf(4f) }
-    var gain by remember { mutableFloatStateOf(3f) }
+    var gain by remember { mutableFloatStateOf(0f) }
     var blur by remember { mutableFloatStateOf(0.8f) }
     var iso by remember { mutableFloatStateOf(200f) }
     var showFiles by remember { mutableStateOf(false) }
@@ -961,7 +961,7 @@ private fun AirPulseScreen(
                         LabeledSlider(stringResource(R.string.high_hz), highHz, 1.2f..4f) { highHz = it; push() }
                         LabeledSlider(stringResource(R.string.pyramid), pyramid, 1f..6f) { pyramid = it; push() }
                     } else {
-                        LabeledSlider(stringResource(R.string.air_gain), gain, 0.5f..20f) { gain = it; push() }
+                        LabeledSlider(stringResource(R.string.air_gain), gain, 0f..20f) { gain = it; push() }
                         LabeledSlider(stringResource(R.string.blur), blur, 0f..3f) { blur = it; push() }
                     }
                 }

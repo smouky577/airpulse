@@ -87,7 +87,7 @@ def make_pattern(
     xx = xx + int(shift_x)
     yy = yy + int(shift_y)
     if kind == "lines":
-        mask = (xx % cell == 0) | (yy % cell == 0)
+        mask = (yy // cell) % 2 == 0
     elif kind == "dots":
         rng = np.random.default_rng(seed)
         cy = (h + abs(shift_y) + cell) // cell + 2
@@ -144,7 +144,9 @@ def run_self_test() -> int:
     assert dim.max() == 80
     lines = make_pattern(5, 5, 2, "lines", False, 255)
     assert lines[0, 0, 0] == 255
-    assert lines[1, 1, 0] == 0
+    assert lines[1, 0, 0] == 255
+    assert lines[2, 0, 0] == 0
+    assert lines[2, 3, 0] == 0
     dots = make_pattern(16, 16, 2, "dots", False, 255, seed=3)
     assert dots.min() == 0 and dots.max() == 255
     tmp = Path(__file__).with_name("_test_grid.png")
@@ -170,7 +172,7 @@ class GridScreen:
         self.root.configure(bg="#111")
         self.root.tk.call("tk", "scaling", 1.0)
         self.cell = tk.IntVar(value=CELL_DEFAULT)
-        self.kind = tk.StringVar(value="checker")
+        self.kind = tk.StringVar(value="lines")
         self.invert = tk.BooleanVar(value=False)
         self.white = tk.IntVar(value=220)
         self.monitor = tk.IntVar(value=0)
@@ -206,7 +208,7 @@ class GridScreen:
         row = tk.Frame(self.root, bg="#111")
         row.pack(fill="x", **pad)
         tk.Label(row, text="Шаблон", fg="white", bg="#111").pack(side="left")
-        for value, label in (("checker", "Шахмат"), ("dots", "Точки"), ("lines", "Линии")):
+        for value, label in (("lines", "Линии"), ("checker", "Шахмат"), ("dots", "Точки")):
             tk.Radiobutton(
                 row, text=label, variable=self.kind, value=value, command=self.refresh,
                 fg="white", bg="#111", selectcolor="#333", activebackground="#111", activeforeground="white",
@@ -248,9 +250,9 @@ class GridScreen:
         tk.Button(row, text="Запиши PNG", command=self.export_png, width=14).pack(side="left", padx=4)
 
         help_text = (
-            "Насочи телефона към монитора, фокус върху шаблона. Клетка 2–4 px е добра за начало.\n"
-            "Ако камерата вижда сиво вместо квадрати — увеличи клетката. Ако прегаря бялото — намалили яркостта.\n"
-            "Клавиши на решетката: Esc затваря, F11 превключва, 1–9 клетка, C/T/L шаблон, I обръщане."
+            "Насочи телефона към монитора, фокус върху шаблона. Хоризонтални линии, клетка 8 px.\n"
+            "Ако се вижда дъга/спирала — натисни 8 или 9 (чертите са прекалено тънки). Ако прегаря бялото — намалили яркостта.\n"
+            "Клавиши: Esc затваря, F11 превключва, 1–9 клетка, L линии, C шахмат, T точки, I обръщане."
         )
         tk.Label(self.root, text=help_text, fg="#bbb", bg="#111", justify="left", wraplength=560).pack(**pad)
         self.status = tk.Label(self.root, text="", fg="#9EE6B8", bg="#111")

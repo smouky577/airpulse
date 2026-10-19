@@ -388,31 +388,56 @@ bool run_frame(Engine& engine, airpulse::ImageU8& bgr, airpulse::ImageU8& gray, 
         decorate_air_view(engine, bgr);
         write_argb(bgr, pixels);
     } else if (engine.capture_ref && engine.bos.reference_ready()) {
-        airpulse::ImageU8 heat;
-        airpulse::ImageF mag;
-        engine.bos.process(gray, heat, mag);
-        double sum = 0.0;
-        for (float v : mag.data) sum += v;
-        stats.mean_mag = mag.data.empty() ? 0.f : static_cast<float>(sum / mag.data.size());
-        stats.p995 = engine.bos.last_percentile995();
         const int n = engine.width * engine.height;
-        if (heat.width == engine.width && heat.height == engine.height &&
-            static_cast<int>(heat.data.size()) >= n * 3 && static_cast<int>(bgr.data.size()) >= n * 3 &&
-            static_cast<int>(mag.data.size()) >= n) {
-            for (int i = 0; i < n; ++i) {
-                // Keep colour on sub-pixel air. Only a hand/body (several px) becomes camera.
-                float object = (mag.data[i] - 3.f) / 5.f;
-                if (object < 0.f) object = 0.f;
-                if (object > 1.f) object = 1.f;
-                const float heat_w = 1.f - object;
-                const float cam_w = object;
-                heat.data[i * 3 + 0] = static_cast<uint8_t>(heat.data[i * 3 + 0] * heat_w + bgr.data[i * 3 + 0] * cam_w);
-                heat.data[i * 3 + 1] = static_cast<uint8_t>(heat.data[i * 3 + 1] * heat_w + bgr.data[i * 3 + 1] * cam_w);
-                heat.data[i * 3 + 2] = static_cast<uint8_t>(heat.data[i * 3 + 2] * heat_w + bgr.data[i * 3 + 2] * cam_w);
+        const auto& ref_img = engine.bos.reference();
+        const bool have_ref = ref_img.width == engine.width && ref_img.height == engine.height &&
+                              static_cast<int>(ref_img.data.size()) >= n;
+        airpulse::ImageU8 shown;
+        shown.width = bgr.width;
+        shown.height = bgr.height;
+        shown.channels = 3;
+        shown.data = bgr.data;
+        const float amp = static_cast<float>(engine.bos_params.gain) * 4.f;
+        std::vector<float> samples;
+        samples.reserve(static_cast<size_t>(n / 4 + 1));
+        double sum = 0.0;
+        int count = 0;
+        if (have_ref) {
+            airpulse::ImageU8 cur;
+            if (engine.bos_params.blur_sigma > 0.0) {
+                airpulse::gaussian_blur_u8(gray, cur, 0, engine.bos_params.blur_sigma);
+            } else {
+                cur.width = gray.width;
+                cur.height = gray.height;
+                cur.channels = 1;
+                cur.data = gray.data;
+            }
+            const uint8_t* ref = ref_img.data.data();
+            const uint8_t* src = cur.data.data();
+            const bool boost_on = amp > 0.05f;
+            for (int i = 0; i < n && static_cast<int>(cur.data.size()) > i; ++i) {
+                const int d = static_cast<int>(src[i]) - static_cast<int>(ref[i]);
+                const int ad = d < 0 ? -d : d;
+                if ((i & 3) == 0) {
+                    samples.push_back(static_cast<float>(ad));
+                    sum += ad;
+                    ++count;
+                }
+                if (!boost_on || ad < 2 || ad > 40) continue;
+                const float boost = static_cast<float>(d) * amp;
+                shown.data[i * 3 + 0] = static_cast<uint8_t>(clamp_int(static_cast<int>(bgr.data[i * 3 + 0] + boost), 0, 255));
+                shown.data[i * 3 + 1] = static_cast<uint8_t>(clamp_int(static_cast<int>(bgr.data[i * 3 + 1] + boost), 0, 255));
+                shown.data[i * 3 + 2] = static_cast<uint8_t>(clamp_int(static_cast<int>(bgr.data[i * 3 + 2] + boost), 0, 255));
             }
         }
-        decorate_air_view(engine, heat);
-        write_argb(heat, pixels);
+        stats.mean_mag = count ? static_cast<float>(sum / count) : 0.f;
+        if (!samples.empty()) {
+            const size_t k = std::min(samples.size() - 1, (samples.size() * 995) / 1000);
+            std::nth_element(samples.begin(), samples.begin() + static_cast<std::ptrdiff_t>(k), samples.end());
+            stats.p995 = samples[k];
+        }
+        decorate_air_view(engine, shown);
+        write_argb(shown, pixels);
     } else {
         airpulse::ImageU8 shown = engine.pulse.magnify(bgr);
         double skin_green = 0.0;
@@ -466,6 +491,8 @@ JNIEXPORT void JNICALL Java_com_airpulse_app_NativeEngine_nativeConfigure(
     engine->fps = fps;
     engine->capture_ref = air_mode == JNI_TRUE;
     engine->pulse_params.alpha = alpha;
+    engine->pulse_params.luma_gain = alpha * 0.4;
+    if (engine->pulse_params.luma_gain > 50.0) engine->pulse_params.luma_gain = 50.0;
     engine->pulse_params.low_hz = low_hz;
     engine->pulse_params.high_hz = high_hz;
     engine->pulse_params.pyramid_level = pyramid;
@@ -492,6 +519,8 @@ JNIEXPORT void JNICALL Java_com_airpulse_app_NativeEngine_nativeUpdate(
     const bool starting_air = air_mode == JNI_TRUE && !engine->capture_ref;
     engine->capture_ref = air_mode == JNI_TRUE;
     engine->pulse_params.alpha = alpha;
+    engine->pulse_params.luma_gain = alpha * 0.4;
+    if (engine->pulse_params.luma_gain > 50.0) engine->pulse_params.luma_gain = 50.0;
     engine->pulse_params.low_hz = low_hz;
     engine->pulse_params.high_hz = high_hz;
     engine->pulse_params.pyramid_level = pyramid;
