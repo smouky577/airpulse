@@ -1,35 +1,51 @@
 # AirPulse
 
-Телефонно приложение за Android: пулс от камерата (цвят на кожата) и въздух пред монитор (BOS). Отделно Windows приложение **GridScreen** показва шахматната решетка за въздушния режим.
+Android camera app: heart rate from skin color, and air movement in front of a monitor (BOS). A separate Windows app, **GridScreen**, shows the checkerboard for air mode.
 
-## Изисквания
+Android приложение: пулс от цвета на кожата и въздух пред монитор (BOS). Отделно Windows приложение **GridScreen** показва шахматната решетка за въздушния режим.
 
-- Android 8.0+, 64-битов телефон (`arm64-v8a`)
-- Windows 10 + Python 3 за GridScreen
-- Android SDK / NDK, ако ще компилираш APK-то сам
+## Pulse / Пулс
 
-## Телефон
+Works best on the **neck** (or face), in good light, with the phone still. The wrist is a weak signal with a camera.
 
-Готовият APK е в `dist/AirPulse.apk`. Инсталира се ръчно (не е в Play Store).
+Най-добре работи на **шията** (или лицето), на светло, с неподвижен телефон. Китката дава слаб сигнал.
 
-Изходен код: `airpulse-android/`. Сглобяване:
+Heart rate often rises with stress. That can look like an improvised “lie detector”, but **it is not one**: pulse also changes with talking, movement, coffee, heat, and nerves. Do not treat the number as proof of anything.
+
+Пулсът често се качва при стрес. Затова някои го ползват като импровизиран „детектор на лъжата“, но **не е такъв**: числото се мени и от говорене, движение, кафе, топлина и нерви. Не го ползвай като доказателство.
+
+## Requirements / Изисквания
+
+- Android 8.0+, 64-bit phone (`arm64-v8a`)
+- Windows 10 + Python 3 for GridScreen
+- Android SDK / NDK if you build the APK yourself
+
+## Phone / Телефон
+
+Ready APK: `dist/AirPulse.apk` (also on [Releases](https://github.com/smouky577/airpulse/releases)). Sideload it; it is not on Play Store.
+
+Готовият APK е в `dist/AirPulse.apk` и в Releases. Инсталира се ръчно.
+
+Source: `airpulse-android/`. Build:
 
 ```
 airpulse-android\build-apk.bat
 ```
 
-## Решетка за монитора
+## Monitor grid / Решетка за монитора
 
 ```
 gridscreen-windows\GridScreen.bat
 ```
 
-Цял екран (F11), клетка 8 px за начало. Камерата гледа решетката; въздухът (дъх, газ) минава между телефона и екрана.
+Fullscreen (F11), start with cell size **8 px**. Point the camera at the grid. Air (breath, gas) must pass **between** the phone and the screen.
 
-## Структура
+Цял екран (F11), клетка **8 px** за начало. Камерата гледа решетката; въздухът минава между телефона и екрана.
 
-- `airpulse-android/` — Android приложение
-- `airpulse-phone/` — общо C++ ядро (пулс и BOS)
-- `gridscreen-windows/` — решетка за Windows
-- `reference/` и `evm_prototype.py` — прототип на алгоритмите
-- `tests/` — настолни тестове на ядрото
+## Layout / Структура
+
+- `airpulse-android/` — Android app
+- `airpulse-phone/` — shared C++ core (pulse and BOS)
+- `gridscreen-windows/` — Windows checkerboard
+- `reference/` and `evm_prototype.py` — algorithm prototype
+- `tests/` — desktop tests for the core
