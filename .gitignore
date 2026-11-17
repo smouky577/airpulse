@@ -28,3 +28,6 @@ gridscreen-windows/_test_grid.png
 Thumbs.db
 Desktop.ini
 .DS_Store
+*.jks
+*.keystore
+keystore.properties

@@ -65,6 +65,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import androidx.core.content.ContextCompat
 import java.io.BufferedWriter
 import java.io.File
@@ -118,6 +119,7 @@ class MainActivity : ComponentActivity() {
                     onSurface = Color.White,
                 ),
             ) {
+                ProvideLanguage {
                 AirPulseScreen(
                     session = session,
                     onAskPermission = { permission.launch(Manifest.permission.CAMERA) },
@@ -126,6 +128,7 @@ class MainActivity : ComponentActivity() {
                     recordings = { recorder.list() },
                     onReplay = { file -> replay(file) },
                 )
+                }
             }
         }
     }
@@ -246,7 +249,7 @@ class MainActivity : ComponentActivity() {
                             ui.bpm = bpm
                             ui.snr = snr
                             if (trace != null) ui.trace = trace
-                            ui.message = getString(R.string.replay_progress, second, totalSec)
+                            ui.message = t(R.string.replay_progress, second, totalSec)
                         }
                         val t = index / header.fps
                         out.write(
@@ -260,7 +263,7 @@ class MainActivity : ComponentActivity() {
                         true
                     }
                 }
-                mainHandler.post { session.ui.message = getString(R.string.replay_done, csv.name) }
+                mainHandler.post { session.ui.message = t(R.string.replay_done, csv.name) }
             } catch (ex: Exception) {
                 logLine("replay ${ex.message}")
                 mainHandler.post { session.ui.error = ex.message }
@@ -546,7 +549,7 @@ class FramePump(
         csv?.close()
         csv = null
         val file = recorder.stop()
-        val text = file?.let { context.getString(R.string.saved, it.name) }
+        val text = file?.let { context.t(R.string.saved, it.name) }
         main.post {
             session.ui.recording = false
             if (text != null) session.ui.message = text
@@ -645,6 +648,13 @@ private fun AirPulseScreen(
     var fpsIndex by remember { mutableIntStateOf(0) }
     var air by remember { mutableStateOf(false) }
     var lock by remember { mutableStateOf(false) }
+    var showManualHint by remember { mutableStateOf(false) }
+    LaunchedEffect(showManualHint) {
+        if (showManualHint) {
+            delay(2500)
+            showManualHint = false
+        }
+    }
     var shutterNs by remember { mutableStateOf<Long?>(20_000_000L) }
     var alpha by remember { mutableFloatStateOf(60f) }
     var lowHz by remember { mutableFloatStateOf(0.8f) }
@@ -705,6 +715,7 @@ private fun AirPulseScreen(
 
     val info = infoAt(camIndex)
     Column(Modifier.fillMaxSize().background(Color.Black)) {
+        AppTitleBar()
         Box(
             Modifier
                 .fillMaxWidth()
@@ -723,26 +734,23 @@ private fun AirPulseScreen(
         }
         Box(Modifier.fillMaxWidth()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
-                if (air) {
+                Box(Modifier.fillMaxWidth().height(36.dp), contentAlignment = Alignment.CenterStart) {
                     Text(
                         when {
-                            ui.refReady -> stringResource(R.string.p995, ui.p995)
-                            ui.snr > 0.05f -> stringResource(R.string.wait_ref, ui.snr)
-                            else -> stringResource(R.string.ref_progress, ui.refCount, 30)
-                        },
-                        color = Color.White,
-                        fontSize = 22.sp,
-                    )
-                } else {
-                    Text(
-                        when {
+                            air && ui.refReady -> stringResource(R.string.p995, ui.p995)
+                            air && ui.snr > 0.05f -> stringResource(R.string.wait_ref, ui.snr)
+                            air -> stringResource(R.string.ref_progress, ui.refCount, 30)
                             ui.bpm < 0f -> stringResource(R.string.collecting)
                             ui.snr < MIN_PULSE_SNR -> stringResource(R.string.weak_signal)
                             else -> stringResource(R.string.bpm, ui.bpm)
                         },
                         color = Color.White,
-                        fontSize = 28.sp,
+                        fontSize = if (air) 22.sp else 28.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                }
+                if (!air) {
                     val trace = ui.trace
                     Canvas(Modifier.fillMaxWidth().height(64.dp)) {
                         if (trace.size < 2) return@Canvas
@@ -762,20 +770,50 @@ private fun AirPulseScreen(
                         }
                     }
                 }
-                Text(
-                    "${stringResource(R.string.resolution)} ${ui.cameraW}×${ui.cameraH} → ${ui.workW}×${ui.workH}    " +
-                        stringResource(R.string.overlay_exposure, ui.exposureNs / 1_000_000f, ui.iso),
-                    color = Color(0xFFB0B0B0),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                )
-                Text(
-                    stringResource(R.string.overlay_rate, ui.measuredFps, ui.processMs, ui.dropped),
-                    color = Color(0xFFB0B0B0),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "${stringResource(R.string.resolution)} ${ui.cameraW}×${ui.cameraH} → ${ui.workW}×${ui.workH}",
+                        color = Color(0xFFB0B0B0),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        stringResource(R.string.overlay_ms, ui.exposureNs / 1_000_000f),
+                        color = Color(0xFFB0B0B0),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                    )
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        stringResource(R.string.overlay_iso, ui.iso) + " " +
+                            stringResource(R.string.overlay_fps, ui.measuredFps) + "  " +
+                            stringResource(R.string.overlay_process, ui.processMs),
+                        color = Color(0xFFB0B0B0),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        stringResource(R.string.overlay_dropped, ui.dropped),
+                        color = Color(0xFFB0B0B0),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                    )
+                }
                 val hints = buildList {
+                    if (showManualHint) add(stringResource(R.string.hint_manual))
                     if (ui.hintMotion) add(stringResource(R.string.hint_motion))
                     if (ui.hintLight) add(stringResource(R.string.hint_light))
                     if (ui.hintBlur) add(stringResource(R.string.hint_blur))
@@ -784,11 +822,19 @@ private fun AirPulseScreen(
                     if (ui.hintPhone) add(stringResource(R.string.hint_phone))
                     if (ui.hintFps) add(stringResource(R.string.hint_fps))
                     if (air && !ui.refReady) add(stringResource(R.string.hint_ref))
-                    if (!info.manualSensor && shutterNs != null && lock) add(stringResource(R.string.hint_manual))
                     if (shutterNs != 10_000_000L && shutterNs != 20_000_000L) add(stringResource(R.string.hint_flicker))
                 }
-                Column(Modifier.fillMaxWidth().height(54.dp).clipToBounds()) {
-                    if (hints.isNotEmpty()) {
+                val recorded = ui.message
+                Box(Modifier.fillMaxWidth().height(20.dp), contentAlignment = Alignment.CenterStart) {
+                    if (recorded != null) {
+                        Text(
+                            recorded,
+                            color = Color(0xFF9EE6B8),
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    } else if (hints.isNotEmpty()) {
                         Text(
                             hints.joinToString(" · "),
                             color = Color(0xFFFFC46B),
@@ -797,8 +843,6 @@ private fun AirPulseScreen(
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    ui.message?.let { Text(it, color = Color(0xFF9EE6B8), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                    ui.error?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 }
                 Column(
                     Modifier.fillMaxWidth().padding(top = 6.dp),
@@ -871,6 +915,7 @@ private fun AirPulseScreen(
                             ),
                             onClick = {
                                 lock = !lock
+                                showManualHint = lock && !info.manualSensor
                                 push(reopenHint = true)
                             },
                         ) {

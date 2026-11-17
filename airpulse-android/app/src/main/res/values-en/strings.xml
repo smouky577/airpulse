@@ -14,7 +14,7 @@
     <string name="settings">Settings</string>
     <string name="debug">Stats</string>
     <string name="collecting">Collecting data…</string>
-    <string name="weak_signal">Weak signal — show your face, closer and in good light</string>
+    <string name="weak_signal">Low light</string>
     <string name="bpm">%1$.0f bpm</string>
     <string name="gain">Pulse amplification</string>
     <string name="low_hz">Low cutoff, Hz</string>
@@ -48,8 +48,13 @@
     <string name="p995">99.5%% : %1$.1f</string>
     <string name="ref_progress">Reference %1$d / %2$d</string>
     <string name="saved">Saved: %1$s</string>
-    <string name="replay_done">Done. Result is in %1$s</string>
+    <string name="replay_done">Result is in %1$s</string>
     <string name="compression_note">The recording is uncompressed. It stops at 20 seconds or when storage runs low.</string>
-    <string name="overlay_rate">%1$.1f fps    %2$.0f ms    dropped %3$d</string>
+    <string name="overlay_rate">%1$.1f fps %2$.0f ms dropped %3$d</string>
+    <string name="overlay_fps">%1$.1f fps</string>
+    <string name="overlay_process">%1$.0f ms</string>
+    <string name="overlay_dropped">dropped %1$d</string>
     <string name="overlay_exposure">%1$.1f ms    ISO %2$d</string>
+    <string name="overlay_ms">%1$.1f ms</string>
+    <string name="overlay_iso">ISO %1$d</string>
 </resources>
