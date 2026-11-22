@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+<meta charset="utf-8">
+<title>BOS фон</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; position: fixed; inset: 0; image-rendering: pixelated; }
+  #ui {
+    position: fixed; top: 10px; left: 10px; z-index: 2;
+    background: rgba(20,20,20,.88); color: #eee; font: 13px system-ui, sans-serif;
+    padding: 10px 12px; border-radius: 8px; line-height: 1.9; min-width: 250px;
+  }
+  #ui label { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+  #ui input[type=range] { width: 120px; }
+  #ui .hint { color: #999; font-size: 12px; line-height: 1.4; margin-top: 6px; }
+  #ui button { margin-top: 4px; }
+  .hidden { display: none; }
+  #ui .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px; }
+  #ui .head b { font-size: 13px; }
+  #toggle {
+    margin: 0; width: 26px; height: 26px; border: 0; border-radius: 6px; cursor: pointer;
+    background: rgba(255,255,255,.12); color: #eee; font-size: 15px; line-height: 26px; padding: 0;
+  }
+  #toggle:hover { background: rgba(255,255,255,.25); }
+  /* свит панел: остава само малко бутонче в ъгъла */
+  #ui.collapsed { min-width: 0; padding: 4px; background: rgba(20,20,20,.55); }
+  #ui.collapsed #uiBody, #ui.collapsed .head b { display: none; }
+  #ui.collapsed:not(:hover) { opacity: .35; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div class="head"><b>BOS настройки</b><button id="toggle" title="Свий / разгъни панела (H)">–</button></div>
+  <div id="uiBody">
+  <label>Шаблон
+    <select id="mode">
+      <option value="noise">Случаен шум (най-добър)</option>
+      <option value="dots">Случайни точки</option>
+      <option value="checker">Шахматна дъска</option>
+      <option value="fchecker">Шах – дробен период + ъгъл (моаре)</option>
+      <option value="lines">Ивици – синусоида (моаре)</option>
+      <option value="blines">Ивици – черно/бели (моаре)</option>
+    </select>
+  </label>
+  <label>Размер (физ. пиксели) <input id="size" type="range" min="1" max="24" value="3"><span id="sizeV">3</span></label>
+  <label>Период (моаре) <input id="per" type="range" min="2" max="24" step="0.05" value="4"><span id="perV">4.00</span></label>
+  <label>Ъгъл (моаре) <input id="ang" type="range" min="0" max="180" step="0.25" value="0"><span id="angV">0°</span></label>
+  <div class="hint">Стрелки ←/→ – фино период · ↑/↓ – фино ъгъл</div>
+  <label>Плътност (точки) <input id="dens" type="range" min="5" max="60" value="35"><span id="densV">35%</span></label>
+  <label>Инвертиране <input id="inv" type="checkbox"></label>
+  <label>Редуване с негатив <input id="alt" type="checkbox"></label>
+  <label>…на всеки N кадъра <input id="altN" type="range" min="1" max="30" value="1"><span id="altNV">1</span></label>
+  <button id="regen">Нов случаен шаблон (R)</button>
+  <div class="hint">
+    F – цял екран · H – свий/разгъни панела · R – нов шаблон<br>
+    I – инвертиране · A – редуване<br>
+    <span id="info"></span>
+  </div>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+let seed = Date.now() >>> 0;
+let imgA = null, imgB = null, showB = false, frame = 0;
+
+// бърз генератор на случайни числа, за да е повторяем при еднакъв seed
+function rng(s) {
+  return function () {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function build() {
+  // canvas в ФИЗИЧЕСКИ пиксели (заобикаля мащабирането на Windows 125%/150%)
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.round(innerWidth * dpr), H = Math.round(innerHeight * dpr);
+  cv.width = W; cv.height = H;
+  cv.style.width = innerWidth + 'px'; cv.style.height = innerHeight + 'px';
+
+  const s = +$('size').value, mode = $('mode').value;
+  const dens = +$('dens').value / 100, inv = $('inv').checked;
+  const rand = rng(seed);
+  const img = ctx.createImageData(W, H), d = img.data;
+  const cols = Math.ceil(W / s), rows = Math.ceil(H / s);
+  const cell = new Uint8Array(cols * rows);
+
+  if (mode === 'noise') {
+    for (let i = 0; i < cell.length; i++) cell[i] = rand() < 0.5 ? 255 : 0;
+  } else if (mode === 'checker') {
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++)
+      cell[y * cols + x] = (x + y) & 1 ? 255 : 0;
+  }
+
+  if (mode === 'fchecker' || mode === 'lines' || mode === 'blines') {
+    // шаблон с дробен период и завъртане – за настройка на моаре спрямо сензора
+    const P = +$('per').value, a = +$('ang').value * Math.PI / 180;
+    const k = 2 * Math.PI / P, ca = Math.cos(a) * k, sa = Math.sin(a) * k;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const u = x * ca + y * sa, w = -x * sa + y * ca;
+        let v;
+        if (mode === 'lines') v = 127.5 + 127.5 * Math.sin(u);
+        else if (mode === 'blines') v = Math.sin(u) >= 0 ? 255 : 0;
+        else v = Math.sin(u) * Math.sin(w) >= 0 ? 255 : 0;
+        const p = (y * W + x) * 4;
+        d[p] = d[p+1] = d[p+2] = v; d[p+3] = 255;
+      }
+    }
+  } else if (mode === 'dots') {
+    // бял фон, черни кръгли точки с диаметър s, разпръснати случайно
+    d.fill(255);
+    const r = Math.max(0.5, s / 2), area = Math.PI * r * r;
+    const n = Math.round(W * H * dens / area);
+    for (let k = 0; k < n; k++) {
+      const cx = rand() * W, cy = rand() * H;
+      const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(W - 1, Math.ceil(cx + r));
+      const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(H - 1, Math.ceil(cy + r));
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+        const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+        if (dx * dx + dy * dy <= r * r) { const p = (y * W + x) * 4; d[p] = d[p+1] = d[p+2] = 0; }
+      }
+    }
+    for (let p = 3; p < d.length; p += 4) d[p] = 255;
+  } else {
+    for (let y = 0; y < H; y++) {
+      const row = Math.floor(y / s) * cols;
+      for (let x = 0; x < W; x++) {
+        const v = cell[row + Math.floor(x / s)], p = (y * W + x) * 4;
+        d[p] = d[p+1] = d[p+2] = v; d[p+3] = 255;
+      }
+    }
+  }
+
+  if (inv) for (let p = 0; p < d.length; p += 4) { d[p] = 255 - d[p]; d[p+1] = 255 - d[p+1]; d[p+2] = 255 - d[p+2]; }
+  imgA = img;
+
+  // негатив за режима с редуване
+  imgB = new ImageData(new Uint8ClampedArray(d), W, H);
+  const e = imgB.data;
+  for (let p = 0; p < e.length; p += 4) { e[p] = 255 - e[p]; e[p+1] = 255 - e[p+1]; e[p+2] = 255 - e[p+2]; }
+
+  showB = false;
+  ctx.putImageData(imgA, 0, 0);
+  $('info').textContent = `Екран: ${W}×${H} физ. px · мащаб ${Math.round(dpr * 100)}%`;
+}
+
+function loop() {
+  if ($('alt').checked && imgA) {
+    frame++;
+    if (frame % +$('altN').value === 0) {
+      showB = !showB;
+      ctx.putImageData(showB ? imgB : imgA, 0, 0);
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+function syncLabels() {
+  $('sizeV').textContent = $('size').value;
+  $('densV').textContent = $('dens').value + '%';
+  $('altNV').textContent = $('altN').value;
+  $('perV').textContent = (+$('per').value).toFixed(2);
+  $('angV').textContent = $('ang').value + '°';
+  const m = $('mode').value, moire = ['fchecker', 'lines', 'blines'].includes(m);
+  $('dens').parentElement.style.opacity = m === 'dots' ? 1 : 0.4;
+  $('size').parentElement.style.opacity = moire ? 0.4 : 1;
+  $('per').parentElement.style.opacity = moire ? 1 : 0.4;
+  $('ang').parentElement.style.opacity = moire ? 1 : 0.4;
+}
+
+function nudge(id, delta) {
+  const el = $(id);
+  el.value = Math.min(+el.max, Math.max(+el.min, +el.value + delta));
+  syncLabels(); build();
+}
+
+['mode', 'size', 'dens', 'inv', 'per', 'ang'].forEach(id => $(id).addEventListener('input', () => { syncLabels(); build(); }));
+$('altN').addEventListener('input', syncLabels);
+$('alt').addEventListener('change', () => { if (!$('alt').checked) { showB = false; ctx.putImageData(imgA, 0, 0); } });
+$('regen').addEventListener('click', () => { seed = (seed * 1664525 + 1013904223) >>> 0; build(); });
+
+let t;
+addEventListener('resize', () => { clearTimeout(t); t = setTimeout(build, 150); });
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'f') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
+  else if (k === 'h') toggleUI();
+  else if (k === 'r') $('regen').click();
+  else if (k === 'i') { $('inv').checked = !$('inv').checked; build(); }
+  else if (k === 'arrowright') { e.preventDefault(); nudge('per', 0.05); }
+  else if (k === 'arrowleft') { e.preventDefault(); nudge('per', -0.05); }
+  else if (k === 'arrowup') { e.preventDefault(); nudge('ang', 0.25); }
+  else if (k === 'arrowdown') { e.preventDefault(); nudge('ang', -0.25); }
+  else if (k === 'a') { $('alt').checked = !$('alt').checked; $('alt').dispatchEvent(new Event('change')); }
+});
+
+function toggleUI() {
+  const c = $('ui').classList.toggle('collapsed');
+  $('toggle').textContent = c ? '⚙' : '–';
+}
+$('toggle').addEventListener('click', e => { toggleUI(); e.currentTarget.blur(); });
+
+syncLabels();
+build();
+loop();
+</script>
+</body>
+</html>

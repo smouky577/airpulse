@@ -36,7 +36,6 @@
     <string name="hint_distance">The grid does not need to fill the frame — step back; air goes between the phone and the screen</string>
     <string name="hint_hot">Hand is too close — watch the waves on the lines, not the flame</string>
     <string name="hint_phone">The phone is moving</string>
-    <string name="hint_manual">This camera has no manual shutter</string>
     <string name="hint_ref">Do not touch the screen — stand shake ruins the reference</string>
     <string name="wait_ref">Hands off for %1$.0f s — waiting for the stand to settle</string>
     <string name="hint_fps">Frames are not holding the selected rate</string>
@@ -57,4 +56,10 @@
     <string name="overlay_exposure">%1$.1f ms    ISO %2$d</string>
     <string name="overlay_ms">%1$.1f ms</string>
     <string name="overlay_iso">ISO %1$d</string>
+    <string name="threshold">Noise threshold</string>
+    <string name="hint_still">Motion – hold still</string>
+    <string name="record_failed">Recording failed</string>
+    <string name="finger">Finger</string>
+    <string name="finger_place">Put a finger on the camera</string>
+    <string name="no_pulse">No pulse</string>
 </resources>

@@ -5,10 +5,12 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <vector>
 
@@ -17,9 +19,75 @@
 
 namespace {
 
+// POS pulse signal (Wang et al., "Algorithmic principles of remote PPG", 2017).
+// Each ~1.6 s window of skin RGB means is divided by its own mean, then projected
+// onto two axes orthogonal to the skin tone: S1 = G - B, S2 = G + B - 2R. Brightness
+// changes (clouds, motion, auto exposure) scale all three channels equally and
+// cancel; the tint of the light cancels through the per-window normalisation.
+// Windows are combined by overlap-add, so a sample is final, and handed out,
+// one window after it came in.
+struct PosFilter {
+    int win = 48;
+    std::deque<std::array<double, 3>> rgb;
+    std::deque<double> acc;
+
+    void reset(double fps) {
+        win = std::max(8, static_cast<int>(std::lround(1.6 * fps)));
+        rgb.clear();
+        acc.clear();
+    }
+
+    bool push(double r, double g, double b, double& out) {
+        rgb.push_back({r, g, b});
+        acc.push_back(0.0);
+        if (static_cast<int>(rgb.size()) > win) rgb.pop_front();
+        if (static_cast<int>(rgb.size()) < win) return false;
+
+        double m[3] = {0.0, 0.0, 0.0};
+        for (const auto& c : rgb) {
+            for (int k = 0; k < 3; ++k) m[k] += c[k];
+        }
+        for (double& v : m) v = std::max(v / win, 1e-6);
+
+        std::vector<double> s1(win), s2(win);
+        double mean1 = 0.0, mean2 = 0.0;
+        for (int i = 0; i < win; ++i) {
+            const double rn = rgb[i][0] / m[0];
+            const double gn = rgb[i][1] / m[1];
+            const double bn = rgb[i][2] / m[2];
+            s1[i] = gn - bn;
+            s2[i] = gn + bn - 2.0 * rn;
+            mean1 += s1[i];
+            mean2 += s2[i];
+        }
+        mean1 /= win;
+        mean2 /= win;
+        double var1 = 0.0, var2 = 0.0;
+        for (int i = 0; i < win; ++i) {
+            var1 += (s1[i] - mean1) * (s1[i] - mean1);
+            var2 += (s2[i] - mean2) * (s2[i] - mean2);
+        }
+        const double ratio = std::sqrt(var1 / std::max(var2, 1e-18));
+
+        double hmean = 0.0;
+        for (int i = 0; i < win; ++i) {
+            s1[i] += ratio * s2[i];
+            hmean += s1[i];
+        }
+        hmean /= win;
+        for (int i = 0; i < win; ++i) acc[i] += s1[i] - hmean;
+
+        // acc[0] is not covered by any later window.
+        out = acc.front();
+        acc.pop_front();
+        return true;
+    }
+};
+
 struct Engine {
     std::mutex mu;
     airpulse::PulseStream pulse;
+    PosFilter pos;
     airpulse::BosStream bos;
     int width = 0;
     int height = 0;
@@ -309,10 +377,12 @@ float motion_of(const std::vector<uint8_t>& gray, std::vector<uint8_t>& prev, bo
     return motion;
 }
 
-// Mean green over skin-coloured pixels (YCrCb box) on a 2x subsampled grid.
-// Returns false when skin covers under 2% of the samples.
-bool skin_green_mean(const airpulse::ImageU8& bgr, double& mean_out) {
-    double sum = 0.0;
+// Mean B, G, R over skin-coloured pixels (YCrCb box) on a 2x subsampled grid.
+// The box is wider in Cb than the classic indoor one so skin under bluish daylight
+// still counts. Only pixels with a clipped channel are dropped: they carry no pulse,
+// but bright, unclipped skin in sunlight does. Returns false under 2% skin.
+bool skin_bgr_mean(const airpulse::ImageU8& bgr, double mean_out[3]) {
+    double sum[3] = {0.0, 0.0, 0.0};
     int skin = 0;
     int total = 0;
     for (int y = 0; y < bgr.height; y += 2) {
@@ -325,14 +395,17 @@ bool skin_green_mean(const airpulse::ImageU8& bgr, double& mean_out) {
             const float cr = (r - luma) * 0.713f + 128.f;
             const float cb = (b - luma) * 0.564f + 128.f;
             ++total;
-            if (cr >= 133.f && cr <= 173.f && cb >= 77.f && cb <= 127.f && luma > 40.f && luma < 245.f) {
-                sum += g;
+            const bool clipped = r >= 250.f || g >= 250.f || b >= 250.f;
+            if (cr >= 133.f && cr <= 178.f && cb >= 77.f && cb <= 135.f && luma > 40.f && !clipped) {
+                sum[0] += b;
+                sum[1] += g;
+                sum[2] += r;
                 ++skin;
             }
         }
     }
     if (total == 0 || skin * 50 < total) return false;
-    mean_out = sum / skin;
+    for (int k = 0; k < 3; ++k) mean_out[k] = sum[k] / skin;
     return true;
 }
 
@@ -440,11 +513,13 @@ bool run_frame(Engine& engine, airpulse::ImageU8& bgr, airpulse::ImageU8& gray, 
         write_argb(shown, pixels);
     } else {
         airpulse::ImageU8 shown = engine.pulse.magnify(bgr);
-        double skin_green = 0.0;
-        if (skin_green_mean(bgr, skin_green)) {
-            engine.pulse.observe_value(skin_green);
-        } else {
-            engine.pulse.observe_roi(bgr, roi);
+        double bgr_mean[3];
+        if (!skin_bgr_mean(bgr, bgr_mean)) {
+            for (int k = 0; k < 3; ++k) bgr_mean[k] = airpulse::mean_u8(bgr, roi, k);
+        }
+        double pulse_sample = 0.0;
+        if (engine.pos.push(bgr_mean[2], bgr_mean[1], bgr_mean[0], pulse_sample)) {
+            engine.pulse.observe_value(pulse_sample);
         }
         double bpm = 0.0;
         if (engine.pulse.displayed_bpm(bpm)) stats.bpm = static_cast<float>(bpm);
@@ -503,6 +578,7 @@ JNIEXPORT void JNICALL Java_com_airpulse_app_NativeEngine_nativeConfigure(
     engine->have_prev = false;
     try {
         engine->pulse.reset(width, height, fps, engine->pulse_params);
+        engine->pos.reset(fps);
         engine->bos.reset(fps, engine->bos_params);
         if (engine->capture_ref) engine->arm_settle();
     } catch (const std::exception& ex) {

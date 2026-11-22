@@ -1,6 +1,18 @@
 package com.airpulse.app
 
 import android.Manifest
+import android.content.ContentValues
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import androidx.compose.ui.viewinterop.AndroidView
+import com.airpulse.app.pulse.PulseRenderer
+import com.airpulse.app.pulse.PulseSettings
+import java.text.SimpleDateFormat
+import java.util.Date
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -65,7 +77,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.delay
 import androidx.core.content.ContextCompat
 import java.io.BufferedWriter
 import java.io.File
@@ -81,11 +92,22 @@ class MainActivity : ComponentActivity() {
     private val engine = NativeEngine()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val session = Session()
-    private lateinit var recorder: RawRecorder
     private lateinit var camera: CameraSession
     private lateinit var pump: FramePump
-    private lateinit var recordDir: File
     private var wasPaused = false
+    private val pulseSettings = PulseSettings()
+    private lateinit var renderer: PulseRenderer
+    private var mp4Uri: Uri? = null
+    private val pulseTrace = FloatArray(180)
+    private val traceTick = object : Runnable {
+        override fun run() {
+            if (!session.controls.get().air && !session.ui.busy && ::renderer.isInitialized) {
+                val n = renderer.copyTrace(pulseTrace)
+                session.ui.trace = if (n > 1) pulseTrace.copyOf(n) else FloatArray(0)
+            }
+            mainHandler.postDelayed(this, 100)
+        }
+    }
 
     private val permission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         session.ui.permission = granted
@@ -94,9 +116,37 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        recordDir = File(getExternalFilesDir(null) ?: filesDir, "recordings")
-        recorder = RawRecorder(recordDir)
-        pump = FramePump(applicationContext, session, mainHandler, recordDir, recorder, engine, ::logLine)
+        renderer = PulseRenderer(pulseSettings, object : PulseRenderer.Listener {
+            override fun onStats(fps: Float, bpm: Float, snr: Float, locked: Boolean) {
+                if (session.controls.get().air || session.ui.busy) return
+                val ui = session.ui
+                ui.measuredFps = fps
+                ui.bpm = if (bpm.isNaN()) -1f else bpm
+                ui.snr = snr
+                // The BPM line itself says "hold still"; no duplicate hint below.
+                ui.hintMotion = false
+                ui.hintLight = false
+                // Air-mode leftovers (FramePump doesn't run in Pulse mode).
+                ui.hintBlur = false
+                ui.hintPattern = false
+                ui.hintHot = false
+                ui.hintPhone = false
+                ui.processMs = 0f
+                ui.dropped = 0
+                val size = session.controls.get().size
+                ui.cameraW = size.width
+                ui.cameraH = size.height
+                ui.workW = size.width
+                ui.workH = size.height
+                ui.hintFps = fps > 1f && abs(fps - 30f) / 30f > 0.2f
+            }
+
+            override fun onError(message: String) {
+                logLine(message)
+                session.ui.error = message
+            }
+        })
+        pump = FramePump(applicationContext, session, mainHandler, engine, ::logLine)
         camera = CameraSession(
             this,
             onFrame = { image -> pump.onImage(image) },
@@ -106,6 +156,16 @@ class MainActivity : ComponentActivity() {
                 mainHandler.post { session.ui.error = message }
             },
         )
+        camera.gpuSurface = { size, orientation, front ->
+            renderer.createCameraSurface(size.width, size.height, orientation, front)
+        }
+        camera.gpuRelease = {
+            renderer.stopRecording()
+            renderer.releaseCameraSurface()
+        }
+        // Air mode: close a running MP4 when the camera stops (mode switch, pause).
+        camera.onClosed = { pump.finishRecord() }
+        mainHandler.post(traceTick)
         session.ui.permission = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
         if (session.ui.permission) loadCameras()
@@ -125,8 +185,9 @@ class MainActivity : ComponentActivity() {
                     onAskPermission = { permission.launch(Manifest.permission.CAMERA) },
                     onApplyCamera = { applyCamera() },
                     onClearReference = { engine.clearReference() },
-                    recordings = { recorder.list() },
-                    onReplay = { file -> replay(file) },
+                    pulse = pulseSettings,
+                    renderer = renderer,
+                    onPulseRecord = { start -> if (start) startMp4() else renderer.stopRecording() },
                 )
                 }
             }
@@ -150,8 +211,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(traceTick)
         if (::camera.isInitialized) camera.release()
-        if (::recorder.isInitialized) recorder.stop()
+        if (::renderer.isInitialized) renderer.release()
         engine.close()
         super.onDestroy()
     }
@@ -188,94 +250,41 @@ class MainActivity : ComponentActivity() {
                 lock = controls.lock,
                 exposureNs = if (controls.lock && info.manualSensor) exposure else if (controls.lock) null else null,
                 iso = iso,
+                gpu = !controls.air,
+                finger = controls.finger && !controls.air,
             ),
         )
     }
 
-    private fun replay(file: File) {
-        pump.paused.set(true)
-        camera.close()
-        session.ui.busy = true
-        Thread {
-            try {
-                val header = RawRecorder.readHeader(file)
-                val controls = session.controls.get()
-                engine.configure(
-                    header.width, header.height, header.fps, header.airMode,
-                    controls.alpha, controls.lowHz, controls.highHz, controls.pyramid,
-                    controls.gain, controls.blur, controls.winsize, controls.highpass,
-                )
-                val csv = File(file.parentFile, file.nameWithoutExtension + ".csv")
-                val frameBytes = 8L + header.width.toLong() * header.height * 3
-                val totalSec = ((file.length() - 48) / frameBytes / header.fps).roundToInt()
-                mainHandler.post {
-                    session.ui.bpm = -1f
-                    session.ui.trace = FloatArray(0)
-                }
-                csv.bufferedWriter().use { out ->
-                    out.write("t_sec,bpm,p995,contrast,motion,mean_mag,ref_count,snr\n")
-                    val pixels = IntArray(header.width * header.height)
-                    val stats = FloatArray(9)
-                    val traceBuf = FloatArray(512)
-                    val swap = header.rotation == 90 || header.rotation == 270
-                    val outW = if (swap) header.height else header.width
-                    val outH = if (swap) header.width else header.height
-                    val shownPixels = IntArray(pixels.size)
-                    val bitmaps = Array(3) { Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888) }
-                    val roi = roiRect(header.width, header.height, 0.5f, 0.5f, 1f / 3f)
-                    var index = 0
-                    var firstStamp = 0L
-                    val wallStart = System.nanoTime()
-                    RawRecorder.readFrames(file) { stamp, bgr ->
-                        engine.processBgr(bgr, roi[0], roi[1], roi[2], roi[3], pixels, stats)
-                        if (index == 0) firstStamp = stamp
-                        val waitMs = ((stamp - firstStamp) - (System.nanoTime() - wallStart)) / 1_000_000
-                        if (waitMs > 0) Thread.sleep(waitMs)
-                        orientPixels(pixels, header.width, header.height, outW, outH, header.rotation, header.mirror, shownPixels)
-                        val bitmap = bitmaps[index % bitmaps.size]
-                        bitmap.setPixels(shownPixels, 0, outW, 0, 0, outW, outH)
-                        val trace = if (index % 10 == 0) {
-                            val count = engine.copyTrace(traceBuf)
-                            if (count > 1) traceBuf.copyOf(count) else null
-                        } else {
-                            null
-                        }
-                        val bpm = stats[0]
-                        val snr = stats[8]
-                        val second = (index / header.fps).toInt()
-                        mainHandler.post {
-                            val ui = session.ui
-                            ui.bitmap = bitmap
-                            ui.bpm = bpm
-                            ui.snr = snr
-                            if (trace != null) ui.trace = trace
-                            ui.message = t(R.string.replay_progress, second, totalSec)
-                        }
-                        val t = index / header.fps
-                        out.write(
-                            String.format(
-                                Locale.US,
-                                "%.4f,%.3f,%.5f,%.3f,%.3f,%.5f,%.0f,%.3f\n",
-                                t, stats[0], stats[1], stats[2], stats[3], stats[7], stats[5], stats[8],
-                            ),
-                        )
-                        index += 1
-                        true
+    /** Pulse mode recording: the composited GPU output as MP4 in Movies/AirPulse. */
+    private fun startMp4() {
+        val target = try {
+            Mp4Store.open(this)
+        } catch (ex: Exception) {
+            logLine("mp4 ${ex.message}")
+            session.ui.message = t(R.string.record_failed)
+            return
+        }
+        renderer.startRecording(target.pfd, onStarted = { ok ->
+            if (!ok) {
+                session.ui.recording = false
+                session.ui.message = Mp4Store.finish(this, target, false)
+            } else {
+                session.ui.recording = true
+                session.ui.recordSec = 0
+                val started = System.nanoTime()
+                mainHandler.post(object : Runnable {
+                    override fun run() {
+                        if (!session.ui.recording) return
+                        session.ui.recordSec = ((System.nanoTime() - started) / 1_000_000_000L).toInt()
+                        mainHandler.postDelayed(this, 500)
                     }
-                }
-                mainHandler.post { session.ui.message = t(R.string.replay_done, csv.name) }
-            } catch (ex: Exception) {
-                logLine("replay ${ex.message}")
-                mainHandler.post { session.ui.error = ex.message }
-            } finally {
-                pump.forceConfigure.set(true)
-                mainHandler.post {
-                    pump.paused.set(false)
-                    session.ui.busy = false
-                    applyCamera()
-                }
+                })
             }
-        }.start()
+        }, onFinished = { ok ->
+            session.ui.recording = false
+            session.ui.message = Mp4Store.finish(this, target, ok)
+        })
     }
 
     private fun logLine(line: String) {
@@ -360,14 +369,13 @@ data class Controls(
     val record: Boolean = false,
     val rotation: Int = 0,
     val mirror: Boolean = false,
+    val finger: Boolean = false,
 )
 
 class FramePump(
     private val context: Context,
     private val session: Session,
     private val main: Handler,
-    private val recordDir: File,
-    private val recorder: RawRecorder,
     private val engine: NativeEngine,
     private val log: (String) -> Unit,
 ) {
@@ -375,7 +383,6 @@ class FramePump(
     val forceConfigure = AtomicBoolean(true)
 
     private var pixels = IntArray(0)
-    private var recordBuf = ByteArray(0)
     private val stats = FloatArray(9)
     private var configuredW = 0
     private var configuredH = 0
@@ -387,9 +394,10 @@ class FramePump(
     private var frames = 0
     private var loggedReject = false
     private var recordStartedNs = 0L
-    private var recordW = 0
-    private var recordH = 0
-    private var csv: BufferedWriter? = null
+    private var encoder: com.airpulse.app.pulse.VideoEncoder? = null
+    private var mp4: Mp4Store.Target? = null
+    private val encPaint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+    private val encRect = android.graphics.Rect()
     private val traceBuf = FloatArray(180)
     private var lightDrift = false
     private var latestTrace: FloatArray? = null
@@ -417,10 +425,6 @@ class FramePump(
         if (controls.cameraId.isEmpty() || controls.workW < 16 || controls.workH < 16) return
         val targetFps = controls.fpsRange.upper.coerceAtLeast(1).toDouble()
         try {
-            if (recorder.isRecording() && (recordW != controls.workW || recordH != controls.workH)) {
-                finishRecord()
-                session.edit { it.copy(record = false) }
-            }
             if (forceConfigure.getAndSet(false) || configuredW != controls.workW || configuredH != controls.workH ||
                 configuredFps != targetFps
             ) {
@@ -434,7 +438,6 @@ class FramePump(
                 configuredFps = targetFps
                 seenRevision = controls.revision
                 pixels = IntArray(controls.workW * controls.workH)
-                recordBuf = ByteArray(pixels.size * 3)
                 log("work ${controls.workW}x${controls.workH} @ $targetFps")
             } else if (seenRevision != controls.revision) {
                 engine.update(
@@ -457,7 +460,7 @@ class FramePump(
                 image.width, image.height,
                 roi[0], roi[1], roi[2], roi[3],
                 pixels, stats,
-                if (controls.record) recordBuf else null,
+                null,
             )
             if (!ok) {
                 if (!loggedReject) {
@@ -493,63 +496,74 @@ class FramePump(
                     lightDrift = hi - lo > 2.5f
                 }
             }
-            handleRecord(controls, image)
             publish(controls, image.width, image.height)
         } catch (ex: Exception) {
             log("frame ${ex.javaClass.simpleName}: ${ex.message}")
         }
     }
 
-    private fun handleRecord(controls: Controls, image: Image) {
-        if (controls.record && !recorder.isRecording()) {
-            recordDir.mkdirs()
-            val file = recorder.start(
-                RawRecorder.Header(
-                    width = controls.workW,
-                    height = controls.workH,
-                    fps = configuredFps,
-                    exposureNs = lastExposure,
-                    iso = lastIso,
-                    airMode = controls.air,
-                    rotation = controls.rotation,
-                    mirror = controls.mirror,
-                ),
-            )
-            csv = BufferedWriter(FileWriter(File(file.parentFile, file.nameWithoutExtension + ".csv")))
-            csv?.write("t_sec,bpm,p995,contrast,motion,mean_mag,snr\n")
-            recordStartedNs = System.nanoTime()
-            recordW = controls.workW
-            recordH = controls.workH
-            main.post { session.ui.recording = true }
+    /**
+     * Air mode recording: the shown (oriented) frame, scaled 2x, encoded to MP4 on this
+     * (camera) thread. No length limit; stops on the button, a mode switch or pause.
+     */
+    private fun handleRecord(controls: Controls, bitmap: Bitmap) {
+        if (controls.record && encoder == null) {
+            try {
+                val target = Mp4Store.open(context)
+                val w = (bitmap.width * 2) and 15.inv()
+                val h = (bitmap.height * 2) and 15.inv()
+                val bitrate = (w.toLong() * h * 30 * 0.2).toInt().coerceIn(2_000_000, 12_000_000)
+                encoder = com.airpulse.app.pulse.VideoEncoder(w, h, 30, bitrate, target.pfd)
+                mp4 = target
+                encRect.set(0, 0, w, h)
+                recordStartedNs = System.nanoTime()
+                recordSec = 0
+                main.post { session.ui.recording = true }
+            } catch (ex: Exception) {
+                log("air mp4 ${ex.message}")
+                mp4?.let { Mp4Store.finish(context, it, false) }
+                mp4 = null
+                session.edit { it.copy(record = false) }
+                main.post {
+                    session.ui.recording = false
+                    session.ui.message = context.t(R.string.record_failed)
+                }
+                return
+            }
         }
-        if (!controls.record && recorder.isRecording()) finishRecord()
-        if (!recorder.isRecording()) return
-        recordDir.mkdirs()
-        val elapsed = (System.nanoTime() - recordStartedNs) / 1e9
-        recordSec = elapsed.toInt()
-        val free = StatFs(recordDir.absolutePath).availableBytes
-        if (elapsed >= 20.0 || recorder.bytes() >= 400L * 1024 * 1024 || free < 200L * 1024 * 1024) {
+        if (!controls.record && encoder != null) finishRecord()
+        val enc = encoder ?: return
+        try {
+            val canvas = enc.inputSurface.lockHardwareCanvas()
+            try {
+                canvas.drawBitmap(bitmap, null, encRect, encPaint)
+            } finally {
+                enc.inputSurface.unlockCanvasAndPost(canvas)
+            }
+            enc.drain(false)
+            recordSec = ((System.nanoTime() - recordStartedNs) / 1_000_000_000L).toInt()
+        } catch (ex: Exception) {
+            log("air mp4 frame ${ex.message}")
             finishRecord()
-            session.edit { it.copy(record = false) }
-            return
         }
-        recorder.writeFrame(image.timestamp, recordBuf, controls.workW * controls.workH * 3)
-        val t = recorder.frameCount / configuredFps.coerceAtLeast(1.0)
-        csv?.write(
-            String.format(
-                Locale.US,
-                "%.4f,%.3f,%.5f,%.3f,%.3f,%.5f,%.3f\n",
-                t, stats[0], stats[1], stats[2], stats[3], stats[7], stats[8],
-            ),
-        )
     }
 
-    private fun finishRecord() {
-        csv?.flush()
-        csv?.close()
-        csv = null
-        val file = recorder.stop()
-        val text = file?.let { context.t(R.string.saved, it.name) }
+    /** Closes a running Air-mode MP4 (camera thread). */
+    fun finishRecord() {
+        val enc = encoder ?: return
+        encoder = null
+        var ok = false
+        try {
+            enc.drain(true)
+        } catch (ex: Exception) {
+            log("air mp4 eos ${ex.message}")
+        } finally {
+            ok = enc.release()
+        }
+        val target = mp4
+        mp4 = null
+        val text = target?.let { Mp4Store.finish(context, it, ok) }
+        session.edit { it.copy(record = false) }
         main.post {
             session.ui.recording = false
             if (text != null) session.ui.message = text
@@ -571,6 +585,7 @@ class FramePump(
             current
         }
         bitmap.setPixels(source, 0, outW, 0, 0, outW, outH)
+        if (controls.air) handleRecord(controls, bitmap)
         val recordSecNow = recordSec
         val shown = bitmap
         slot = (slot + 1) % bitmaps.size
@@ -626,8 +641,9 @@ private fun AirPulseScreen(
     onAskPermission: () -> Unit,
     onApplyCamera: () -> Unit,
     onClearReference: () -> Unit,
-    recordings: () -> List<File>,
-    onReplay: (File) -> Unit,
+    pulse: PulseSettings,
+    renderer: PulseRenderer,
+    onPulseRecord: (Boolean) -> Unit,
 ) {
     val ui = session.ui
     if (!ui.permission) {
@@ -648,13 +664,6 @@ private fun AirPulseScreen(
     var fpsIndex by remember { mutableIntStateOf(0) }
     var air by remember { mutableStateOf(false) }
     var lock by remember { mutableStateOf(false) }
-    var showManualHint by remember { mutableStateOf(false) }
-    LaunchedEffect(showManualHint) {
-        if (showManualHint) {
-            delay(2500)
-            showManualHint = false
-        }
-    }
     var shutterNs by remember { mutableStateOf<Long?>(20_000_000L) }
     var alpha by remember { mutableFloatStateOf(60f) }
     var lowHz by remember { mutableFloatStateOf(0.8f) }
@@ -663,11 +672,10 @@ private fun AirPulseScreen(
     var gain by remember { mutableFloatStateOf(0f) }
     var blur by remember { mutableFloatStateOf(0.8f) }
     var iso by remember { mutableFloatStateOf(200f) }
-    var showFiles by remember { mutableStateOf(false) }
+    var threshold by remember { mutableFloatStateOf(0f) }
+    var finger by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
-    var files by remember { mutableStateOf<List<File>>(emptyList()) }
     var started by remember { mutableStateOf(false) }
-    val replayText = stringResource(R.string.replay)
 
     fun infoAt(index: Int) = cameras[index.coerceIn(0, cameras.lastIndex)]
 
@@ -676,6 +684,12 @@ private fun AirPulseScreen(
         val size = info.sizes[sizeIndex.coerceIn(0, info.sizes.lastIndex)]
         val fps = info.fpsRanges[fpsIndex.coerceIn(0, info.fpsRanges.lastIndex)]
         val work = workingSize(size, air)
+        pulse.alpha = alpha
+        pulse.lowHz = lowHz.toDouble()
+        pulse.highHz = highHz.toDouble().coerceAtLeast(lowHz.toDouble() + 0.2)
+        pulse.level = pyramid.roundToInt().coerceIn(3, 6)
+        pulse.threshold = threshold
+        pulse.finger = finger && !air
         session.edit {
             it.copy(
                 air = air,
@@ -697,6 +711,7 @@ private fun AirPulseScreen(
                 record = if (it.workW != work.first || it.workH != work.second) false else it.record,
                 rotation = ((info.sensorOrientation % 360) + 360) % 360,
                 mirror = !info.facingBack,
+                finger = finger,
             )
         }
         if (reopenHint || !started) onApplyCamera()
@@ -723,7 +738,24 @@ private fun AirPulseScreen(
                 .clipToBounds(),
         ) {
             val bitmap = ui.bitmap
-            if (bitmap != null) {
+            if (!air && !ui.busy) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        SurfaceView(ctx).apply {
+                            holder.addCallback(object : SurfaceHolder.Callback {
+                                override fun surfaceCreated(holder: SurfaceHolder) {}
+                                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                                    renderer.setDisplaySurface(holder.surface, width, height)
+                                }
+                                override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                    renderer.clearDisplaySurface()
+                                }
+                            })
+                        }
+                    },
+                )
+            } else if (bitmap != null) {
                 Image(
                     bitmap = bitmap.asImageBitmap(),
                     contentDescription = null,
@@ -740,11 +772,14 @@ private fun AirPulseScreen(
                             air && ui.refReady -> stringResource(R.string.p995, ui.p995)
                             air && ui.snr > 0.05f -> stringResource(R.string.wait_ref, ui.snr)
                             air -> stringResource(R.string.ref_progress, ui.refCount, 30)
-                            ui.bpm < 0f -> stringResource(R.string.collecting)
+                            // Pulse mode: only the number here; status goes over the green trace.
+                            !air && ui.bpm < 0f -> "-- bpm"
+                            !air -> stringResource(R.string.bpm, ui.bpm)
                             ui.snr < MIN_PULSE_SNR -> stringResource(R.string.weak_signal)
                             else -> stringResource(R.string.bpm, ui.bpm)
                         },
-                        color = Color.White,
+                        // Pulse: a held (frozen) number while motion blocks new data is orange.
+                        color = if (!air && ui.bpm >= 0f && ui.snr < 0f) Color(0xFFFFA726) else Color.White,
                         fontSize = if (air) 22.sp else 28.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -752,7 +787,15 @@ private fun AirPulseScreen(
                 }
                 if (!air) {
                     val trace = ui.trace
-                    Canvas(Modifier.fillMaxWidth().height(64.dp)) {
+                    val status = when {
+                        ui.snr < -2.5f -> stringResource(R.string.no_pulse)
+                        ui.snr < -1.5f -> stringResource(R.string.finger_place)
+                        ui.snr < 0f -> stringResource(R.string.hint_still)
+                        ui.bpm < 0f -> stringResource(R.string.collecting)
+                        else -> null
+                    }
+                    Box(Modifier.fillMaxWidth().height(64.dp), contentAlignment = Alignment.Center) {
+                    Canvas(Modifier.matchParentSize()) {
                         if (trace.size < 2) return@Canvas
                         var lo = trace[0]
                         var hi = trace[0]
@@ -768,6 +811,19 @@ private fun AirPulseScreen(
                             val y1 = size.height - (trace[i] - lo) / span * size.height
                             drawLine(Color(0xFF3DDC84), Offset(x0, y0), Offset(x1, y1), strokeWidth = 2f)
                         }
+                    }
+                    if (status != null) {
+                        Text(
+                            status,
+                            color = Color(0xFFFFC46B),
+                            fontSize = 18.sp,
+                            maxLines = 2,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            modifier = Modifier
+                                .background(Color(0xB0000000), androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                        )
+                    }
                     }
                 }
                 Row(
@@ -810,10 +866,12 @@ private fun AirPulseScreen(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         maxLines = 1,
+                        // About three monospace characters, so a 3-4 digit count clears the screen edge.
+                        softWrap = false,
+                        modifier = Modifier.padding(start = 6.dp, end = 22.dp),
                     )
                 }
                 val hints = buildList {
-                    if (showManualHint) add(stringResource(R.string.hint_manual))
                     if (ui.hintMotion) add(stringResource(R.string.hint_motion))
                     if (ui.hintLight) add(stringResource(R.string.hint_light))
                     if (ui.hintBlur) add(stringResource(R.string.hint_blur))
@@ -825,6 +883,13 @@ private fun AirPulseScreen(
                     if (shutterNs != 10_000_000L && shutterNs != 20_000_000L) add(stringResource(R.string.hint_flicker))
                 }
                 val recorded = ui.message
+                // "Saved: ..." and similar notes show for 3 s, then the line goes back to hints.
+                LaunchedEffect(recorded) {
+                    if (recorded != null) {
+                        kotlinx.coroutines.delay(3000)
+                        if (ui.message == recorded) ui.message = null
+                    }
+                }
                 Box(Modifier.fillMaxWidth().height(20.dp), contentAlignment = Alignment.CenterStart) {
                     if (recorded != null) {
                         Text(
@@ -852,13 +917,13 @@ private fun AirPulseScreen(
                         ModeButton(stringResource(R.string.mode_pulse), !air, Color(0xFFE53935), !ui.busy, Modifier.weight(1f)) {
                             if (air) {
                                 air = false
-                                push(reopenHint = false)
+                                push(reopenHint = true) // Pulse = GPU surface, Air = ImageReader: reopen
                             }
                         }
                         ModeButton(stringResource(R.string.mode_air), air, Color(0xFF4FC3F7), !ui.busy, Modifier.weight(1f)) {
                             if (!air) {
                                 air = true
-                                push(reopenHint = false)
+                                push(reopenHint = true)
                             }
                         }
                     }
@@ -893,8 +958,12 @@ private fun AirPulseScreen(
                             ),
                             onClick = {
                                 val next = !ui.recording
-                                session.edit { it.copy(record = next) }
-                                ui.recording = next
+                                if (!air) {
+                                    onPulseRecord(next)
+                                } else {
+                                    session.edit { it.copy(record = next) }
+                                    ui.recording = next
+                                }
                             },
                         ) {
                             if (ui.recording) {
@@ -905,33 +974,42 @@ private fun AirPulseScreen(
                                 Text(stringResource(R.string.record), maxLines = 1)
                             }
                         }
-                        Button(
-                            modifier = Modifier.weight(1f).height(48.dp),
-                            contentPadding = PaddingValues(0.dp),
-                            enabled = !ui.busy,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (lock) Color(0xFFFFB300) else Color(0xFF2A2A2A),
-                                contentColor = if (lock) Color.Black else Color.White,
-                            ),
-                            onClick = {
-                                lock = !lock
-                                showManualHint = lock && !info.manualSensor
-                                push(reopenHint = true)
-                            },
-                        ) {
-                            LockIcon(locked = lock, color = if (lock) Color.Black else Color.White)
+                        if (!air) {
+                            // Pulse mode: AE/AWB lock themselves; this slot measures on a fingertip.
+                            Button(
+                                modifier = Modifier.weight(1f).height(48.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                enabled = !ui.busy,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (finger) Color(0xFFE53935) else Color(0xFF2A2A2A),
+                                    contentColor = if (finger) Color.Black else Color.White,
+                                ),
+                                onClick = {
+                                    finger = !finger
+                                    push(reopenHint = true)
+                                },
+                            ) {
+                                Text(stringResource(R.string.finger), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        } else {
+                            Button(
+                                modifier = Modifier.weight(1f).height(48.dp),
+                                contentPadding = PaddingValues(0.dp),
+                                enabled = !ui.busy,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (lock) Color(0xFFFFB300) else Color(0xFF2A2A2A),
+                                    contentColor = if (lock) Color.Black else Color.White,
+                                ),
+                                onClick = {
+                                    lock = !lock
+                                    push(reopenHint = true)
+                                },
+                            ) {
+                                LockIcon(locked = lock, color = if (lock) Color.Black else Color.White)
+                            }
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Button(
-                            modifier = Modifier.weight(1f),
-                            enabled = !ui.busy && !ui.recording,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A2A2A), contentColor = Color.White),
-                            onClick = {
-                                files = recordings()
-                                showFiles = true
-                            },
-                        ) { Text(stringResource(R.string.open_recording)) }
                         Button(
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A2A2A), contentColor = Color.White),
@@ -1004,7 +1082,8 @@ private fun AirPulseScreen(
                         LabeledSlider(stringResource(R.string.gain), alpha, 5f..150f) { alpha = it; push() }
                         LabeledSlider(stringResource(R.string.low_hz), lowHz, 0.4f..1.5f) { lowHz = it; push() }
                         LabeledSlider(stringResource(R.string.high_hz), highHz, 1.2f..4f) { highHz = it; push() }
-                        LabeledSlider(stringResource(R.string.pyramid), pyramid, 1f..6f) { pyramid = it; push() }
+                        LabeledSlider(stringResource(R.string.pyramid), pyramid, 3f..6f) { pyramid = it; push() }
+                        LabeledSlider(stringResource(R.string.threshold), threshold, 0f..1f) { threshold = it; push() }
                     } else {
                         LabeledSlider(stringResource(R.string.air_gain), gain, 0f..20f) { gain = it; push() }
                         LabeledSlider(stringResource(R.string.blur), blur, 0f..3f) { blur = it; push() }
@@ -1012,27 +1091,6 @@ private fun AirPulseScreen(
                 }
             }
         }
-    }
-    if (showFiles) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { showFiles = false },
-            title = { Text(stringResource(R.string.open_recording)) },
-            text = {
-                Column(Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState())) {
-                    if (files.isEmpty()) Text("—", color = Color.White)
-                    files.forEach { file ->
-                        TextButton(onClick = {
-                            showFiles = false
-                            session.ui.message = replayText
-                            onReplay(file)
-                        }) { Text(file.name) }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showFiles = false }) { Text(stringResource(R.string.close)) }
-            },
-        )
     }
 }
 

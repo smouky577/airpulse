@@ -48,7 +48,29 @@ class CameraSession(
         val lock: Boolean,
         val exposureNs: Long?,
         val iso: Int,
+        /** Pulse mode: stream into the GPU renderer instead of the YUV ImageReader. */
+        val gpu: Boolean = false,
+        /** Finger-on-lens mode: AE/AWB settle again (the frame gets much darker), no torch. */
+        val finger: Boolean = false,
     )
+
+    /**
+     * Pulse mode surface source: called on the camera thread with the stream size, sensor
+     * orientation and front flag; [gpuRelease] runs after that session is closed.
+     */
+    var gpuSurface: ((Size, Int, Boolean) -> android.view.Surface?)? = null
+    var gpuRelease: (() -> Unit)? = null
+    /** Runs on the camera thread whenever the camera is closed. */
+    var onClosed: (() -> Unit)? = null
+    private var gpuActive = false
+    private var autoLocked = false
+    private val autoLock = Runnable {
+        val cfg = runningConfig
+        if (cfg != null && cfg.gpu) {
+            autoLocked = true
+            applyRepeating(cfg)
+        }
+    }
 
     private val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val thread = HandlerThread("airpulse-camera").also { it.start() }
@@ -95,25 +117,39 @@ class CameraSession(
             try {
                 closeOnCameraThread()
                 runningConfig = config
-                val reader = ImageReader.newInstance(config.size.width, config.size.height, ImageFormat.YUV_420_888, 3)
-                reader.setOnImageAvailableListener({ r ->
-                    val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
-                    try {
-                        onFrame(image)
-                    } finally {
-                        image.close()
-                    }
-                }, handler)
-                this.reader = reader
+                val target: android.view.Surface
+                if (config.gpu) {
+                    val chars = manager.getCameraCharacteristics(config.cameraId)
+                    val orientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+                    val front = chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+                    target = gpuSurface?.invoke(config.size, orientation, front)
+                        ?: throw IllegalStateException("GPU surface unavailable")
+                    gpuActive = true
+                    autoLocked = false
+                    handler.postDelayed(autoLock, AUTO_LOCK_MS)
+                } else {
+                    val reader = ImageReader.newInstance(config.size.width, config.size.height, ImageFormat.YUV_420_888, 3)
+                    reader.setOnImageAvailableListener({ r ->
+                        val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                        try {
+                            onFrame(image)
+                        } finally {
+                            image.close()
+                        }
+                    }, handler)
+                    this.reader = reader
+                    target = reader.surface
+                }
                 manager.openCamera(config.cameraId, object : CameraDevice.StateCallback() {
                     override fun onOpened(camera: CameraDevice) {
                         device = camera
                         try {
                             camera.createCaptureSession(
-                                listOf(reader.surface),
+                                listOf(target),
                                 object : CameraCaptureSession.StateCallback() {
                                     override fun onConfigured(captureSession: CameraCaptureSession) {
                                         session = captureSession
+                                        captureTarget = target
                                         applyRepeating(config)
                                     }
 
@@ -152,13 +188,22 @@ class CameraSession(
     fun update(config: Config) {
         val current = runningConfig
         if (current == null || current.cameraId != config.cameraId || current.size != config.size ||
-            current.fpsRange != config.fpsRange
+            current.fpsRange != config.fpsRange || current.gpu != config.gpu
         ) {
             open(config)
             return
         }
+        val fingerChanged = current.finger != config.finger
         runningConfig = config
-        handler.post { applyRepeating(config) }
+        handler.post {
+            if (fingerChanged && config.gpu) {
+                // The light changes completely: let AE/AWB settle again, then re-freeze.
+                autoLocked = false
+                handler.removeCallbacks(autoLock)
+                handler.postDelayed(autoLock, AUTO_LOCK_MS)
+            }
+            applyRepeating(config)
+        }
     }
 
     fun close() {
@@ -180,16 +225,21 @@ class CameraSession(
     private fun applyRepeating(config: Config) {
         val camera = device ?: return
         val captureSession = session ?: return
-        val surface = reader?.surface ?: return
+        val surface = captureTarget ?: return
         try {
             val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             builder.addTarget(surface)
             builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, config.fpsRange)
+            // 50 Hz mains: lamps flicker at 100 Hz, which aliases into the pulse band.
+            builder.set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_50HZ)
             if (config.lock && config.exposureNs != null) {
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
                 builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, config.exposureNs)
                 builder.set(CaptureRequest.SENSOR_SENSITIVITY, config.iso)
-                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+                // AWB OFF without explicit colour gains leaves the colours undefined.
+                // Freeze the white balance auto mode already settled on instead.
+                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                builder.set(CaptureRequest.CONTROL_AWB_LOCK, true)
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
                 if (focusDistance > 0f) builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance)
             } else if (config.lock) {
@@ -201,8 +251,11 @@ class CameraSession(
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                 builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-                builder.set(CaptureRequest.CONTROL_AE_LOCK, false)
-                builder.set(CaptureRequest.CONTROL_AWB_LOCK, false)
+                // Pulse mode: let AE/AWB settle, then freeze them (3 s after opening), so exposure
+                // steps don't land in the heart-rate signal.
+                val freeze = config.gpu && autoLocked && !config.finger
+                builder.set(CaptureRequest.CONTROL_AE_LOCK, freeze)
+                builder.set(CaptureRequest.CONTROL_AWB_LOCK, freeze)
             }
             captureSession.setRepeatingRequest(builder.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
@@ -222,13 +275,26 @@ class CameraSession(
     }
 
     private fun closeOnCameraThread() {
+        handler.removeCallbacks(autoLock)
         session?.close()
         session = null
         device?.close()
         device = null
         reader?.close()
         reader = null
+        captureTarget = null
+        if (gpuActive) {
+            gpuActive = false
+            gpuRelease?.invoke()
+        }
+        onClosed?.invoke()
         runningConfig = null
+    }
+
+    private var captureTarget: android.view.Surface? = null
+
+    companion object {
+        private const val AUTO_LOCK_MS = 3000L
     }
 
     private fun yuvSizes(map: StreamConfigurationMap): List<Size> {
